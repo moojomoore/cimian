@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9]'
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version YYYY.MM.DD.HHMM'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +21,8 @@ jobs:
   release:
     runs-on: windows-latest
     timeout-minutes: 90
+    env:
+      RELEASE_VERSION: ${{ inputs.release_version || github.ref_name }}
 
     steps:
       - name: Checkout
@@ -31,7 +39,10 @@ jobs:
       # No NuGet caching — see ci.yml for rationale.
       - name: Build (unsigned)
         shell: pwsh
-        run: .\build.ps1 -NoSign -ReleaseVersion '${{ github.ref_name }}'
+        run: |
+          $ver = '${{ inputs.release_version }}'
+          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = '${{ env.RELEASE_VERSION }}' }
+          .\build.ps1 -NoSign -ReleaseVersion $ver
 
       - name: Capture build info
         id: version
@@ -44,7 +55,7 @@ jobs:
           } else {
             throw "Could not parse datestamp version from $($msi.Name)"
           }
-          $tag = '${{ github.ref_name }}'
+          $tag = '${{ env.RELEASE_VERSION }}'
           if ($datestamp -ne $tag) {
             throw "Release tag $tag does not match produced build version $datestamp"
           }
@@ -95,7 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = '${{ env.RELEASE_VERSION }}'
           $datestamp = '${{ steps.version.outputs.datestamp }}'
           $dotnet = '${{ steps.version.outputs.dotnet }}'
           $os = '${{ steps.version.outputs.os }}'
