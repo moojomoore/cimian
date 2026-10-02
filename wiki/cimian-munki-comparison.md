@@ -59,6 +59,8 @@ Same semantics as Munki. If you are reusing `installcheck_script` bodies from a 
 
 **`default_installs` is a one-time SelfServe seed (Munki 6.1), not forever-force-install.** On first encounter Cimian records the name under SelfServe `default_installs` + `managed_installs` (same as Munki `process_default_installs`); later runs see that record and do not re-seed, so a user who removes the item in MSC keeps it removed. Leftover `Action=default` markers do not queue installs. The seed semantics were fixed in [#188](https://github.com/windowsadmins/cimian/pull/188); [#189](https://github.com/windowsadmins/cimian/pull/189) reworks the InstallInfo analyzer and relocates that seed into the post-optional pass order above.
 
+**`force_install_after_date` on optional_installs matches Munki.** A deadline stamped in pkginfo does not force-install a title that is only listed under `optional_installs`, and the Software-tab detail page does not show a "must be installed by" banner for that title. The deadline applies once the user opts in (SelfServe promotes the item to a managed install) or the title is otherwise on a managed install/update queue.
+
 ## Windows quirks that actually diverge
 
 This is the section worth reading slowly. Everything above just works. Everything below is where your Mac instincts will mislead you.

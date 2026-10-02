@@ -460,29 +460,9 @@ public sealed class InstallInfoAnalyzer
         info.OptionalInstalls.Add(optRecord);
         effectiveItems.Add(mi);
 
-        // force_install_after_date on optional (Cimian existing behavior)
-        if (cat?.ForceInstallAfterDate != null && DateTime.Now >= cat.ForceInstallAfterDate.Value)
-        {
-            if (UpdateEngine.IsEligibleForOsVersion(cat, out _, out _) &&
-                UpdateEngine.IsEligibleForAgentVersion(cat, out _, out _))
-            {
-                var status = _statusService.CheckStatus(cat, "install", _config.CachePath);
-                if (status.NeedsAction)
-                {
-                    ConsoleLogger.Info(
-                        $"    -> force_install_after_date {cat.ForceInstallAfterDate.Value:yyyy-MM-dd} has passed, forcing install of optional item {mi.Name}");
-                    if (status.IsUpdate)
-                    {
-                        if (!toUpdate.Any(c => NameEquals(c.Name, cat.Name)))
-                            toUpdate.Add(cat);
-                    }
-                    else if (!toInstall.Any(c => NameEquals(c.Name, cat.Name)))
-                    {
-                        toInstall.Add(cat);
-                    }
-                }
-            }
-        }
+        // Munki parity (#190): force_install_after_date does not apply to a title
+        // that is only in optional_installs. The user must opt in (SelfServe
+        // promotes the action to install) before a deadline can queue the item.
     }
 
     private void ProcessRemoval(
@@ -728,6 +708,8 @@ public sealed class InstallInfoAnalyzer
     private InstallInfoItem BuildOptionalRecord(string name, CatalogItem? cat, string? pendingStatus)
     {
         var optItem = BuildInstallInfoItem(name, cat);
+        // Optional Software-tab rows must not carry a force deadline (#190 / Munki).
+        optItem.ForceInstallAfterDate = null;
         if (cat != null)
         {
             var status = _statusService.CheckStatus(cat, "install", _config.CachePath);
