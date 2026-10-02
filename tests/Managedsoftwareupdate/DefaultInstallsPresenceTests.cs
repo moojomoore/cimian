@@ -7,8 +7,9 @@ namespace Cimian.Tests.Managedsoftwareupdate;
 
 /// <summary>
 /// default_installs means "install once via SelfServe, then the user owns presence"
-/// (Munki 6.1). These tests cover the pure seed helper and IdentifyActions skipping
-/// leftover Action=default markers.
+/// (Munki 6.1). Pure seed helper coverage plus IdentifyActions skipping leftover
+/// Action=default markers. Seed logic lives on <see cref="InstallInfoAnalyzer"/>
+/// (relocated from ManifestService — see windowsadmins/cimian#188 / #189).
 /// </summary>
 public class DefaultInstallsPresenceTests : IDisposable
 {
@@ -77,7 +78,7 @@ public class DefaultInstallsPresenceTests : IDisposable
         };
         var selfServe = EmptySelfServe();
 
-        var changed = ManifestService.SeedDefaultInstallsInto(items, selfServe, out var seeded);
+        var changed = InstallInfoAnalyzer.SeedDefaultInstallsInto(items, selfServe, out var seeded);
 
         Assert.True(changed);
         Assert.Equal(new[] { name }, seeded);
@@ -97,7 +98,7 @@ public class DefaultInstallsPresenceTests : IDisposable
         selfServe.DefaultInstalls.Add(name);
         // User removed: not in managed_installs.
 
-        var changed = ManifestService.SeedDefaultInstallsInto(items, selfServe, out var seeded);
+        var changed = InstallInfoAnalyzer.SeedDefaultInstallsInto(items, selfServe, out var seeded);
 
         Assert.False(changed);
         Assert.Empty(seeded);
@@ -116,7 +117,7 @@ public class DefaultInstallsPresenceTests : IDisposable
         };
         var selfServe = EmptySelfServe();
 
-        var changed = ManifestService.SeedDefaultInstallsInto(items, selfServe, out var seeded);
+        var changed = InstallInfoAnalyzer.SeedDefaultInstallsInto(items, selfServe, out var seeded);
 
         Assert.True(changed);
         Assert.Equal(new[] { name }, seeded);
@@ -136,7 +137,7 @@ public class DefaultInstallsPresenceTests : IDisposable
         var selfServe = EmptySelfServe();
         selfServe.ManagedUninstalls.Add(name);
 
-        var changed = ManifestService.SeedDefaultInstallsInto(items, selfServe, out _);
+        var changed = InstallInfoAnalyzer.SeedDefaultInstallsInto(items, selfServe, out _);
 
         Assert.True(changed);
         Assert.Contains(name, selfServe.ManagedUninstalls, StringComparer.OrdinalIgnoreCase);
@@ -159,7 +160,7 @@ public class DefaultInstallsPresenceTests : IDisposable
     public void IdentifyActions_SelfServePromotedInstall_NotInstalled_StillInstalls()
     {
         var item = AbsentItem(Unique("seeded"));
-        // After seed + merge, the winning action is SelfServe install.
+        // After seed + SelfServe, the winning action is SelfServe install.
         var manifest = new List<ManifestItem>
         {
             new()
@@ -203,14 +204,14 @@ public class DefaultInstallsPresenceTests : IDisposable
         };
 
         var selfServe = EmptySelfServe();
-        Assert.True(ManifestService.SeedDefaultInstallsInto(items, selfServe, out _));
+        Assert.True(InstallInfoAnalyzer.SeedDefaultInstallsInto(items, selfServe, out _));
 
         // User removes in MSC: drop from managed_installs, keep default_installs,
         // optionally queue uninstall (seed must not put it back on managed_installs).
         selfServe.ManagedInstalls.RemoveAll(x => x.Equals(name, StringComparison.OrdinalIgnoreCase));
         selfServe.ManagedUninstalls.Add(name);
 
-        var changed = ManifestService.SeedDefaultInstallsInto(items, selfServe, out var seeded);
+        var changed = InstallInfoAnalyzer.SeedDefaultInstallsInto(items, selfServe, out var seeded);
 
         Assert.False(changed);
         Assert.Empty(seeded);

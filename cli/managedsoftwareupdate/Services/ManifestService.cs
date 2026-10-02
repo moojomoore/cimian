@@ -75,17 +75,12 @@ public class ManifestService
             items.AddRange(conditionalResults);
         }
 
-        // PASS 3: One-time SelfServe seed for manifest default_installs (Munki 6.1).
-        // Must run before the SelfServe merge so newly seeded managed_installs are
-        // promoted in this same run.
-        await SeedDefaultInstallsAsync(items);
-
-        // PASS 4: Merge user-driven self-service requests (Munki parity: pkg/selfservice).
-        // The GUI writes SelfServeManifest.yaml when a user clicks Install/Remove on an
-        // optional item; without this merge MSU sees the item only as `optional` and
-        // never queues an action.
-        await MergeSelfServeManifestAsync(items);
-
+        // SelfServe merge and default_installs seed run in InstallInfoAnalyzer after
+        // optional_installs exist (Munki updatecheck/core.py order). The one-time
+        // default_installs seed semantics match #188; this PR relocates that work
+        // out of ManifestService into the analyzer. Returning raw section
+        // memberships — including both update and optional for the same name —
+        // is intentional.
         return items;
     }
 
@@ -108,11 +103,6 @@ public class ManifestService
             var conditionalResults = ProcessConditionalItems(conditionalItems, sourceManifest);
             items.AddRange(conditionalResults);
         }
-
-        // Same SelfServe seed + merge as GetManifestItemsAsync so --manifest runs
-        // honor default_installs and pending self-serve requests.
-        await SeedDefaultInstallsAsync(items);
-        await MergeSelfServeManifestAsync(items);
 
         return items;
     }
@@ -673,112 +663,6 @@ public class ManifestService
             _ => Environment.Is64BitOperatingSystem ? "x64" : "x86"
         };
     }
-
-    /// <summary>
-    /// One-time SelfServe seed for manifest <c>default_installs</c> (Munki 6.1 parity:
-    /// <c>process_default_installs</c>). Names not yet recorded under SelfServe
-    /// <c>default_installs</c> are appended there and to <c>managed_installs</c>.
-    /// Subsequent runs see the SelfServe record and do not re-seed, so a user who
-    /// removes the item in MSC keeps it removed.
-    /// </summary>
-    private async Task SeedDefaultInstallsAsync(List<ManifestItem> items)
-    {
-        if (_config.SkipSelfService)
-        {
-            ConsoleLogger.Debug("SelfServe default_installs seed skipped (SkipSelfService=true)");
-            return;
-        }
-
-        if (!items.Any(i => string.Equals(i.Action, "default", StringComparison.OrdinalIgnoreCase)))
-        {
-            return;
-        }
-
-        SelfServiceManifestService svc;
-        SelfServiceManifest selfServe;
-        try
-        {
-            svc = new SelfServiceManifestService();
-            selfServe = await svc.LoadAsync();
-        }
-        catch (Exception ex)
-        {
-            ConsoleLogger.Warn($"Failed to load SelfServeManifest for default_installs seed: {ex.Message}");
-            return;
-        }
-
-        if (!SeedDefaultInstallsInto(items, selfServe, out var seeded))
-        {
-            return;
-        }
-
-        try
-        {
-            await svc.SaveAsync(selfServe);
-            ConsoleLogger.Info($"    Seeded {seeded.Count} default_installs into SelfServeManifest: [{string.Join(", ", seeded)}]");
-        }
-        catch (Exception ex)
-        {
-            ConsoleLogger.Warn($"Failed to save SelfServeManifest after default_installs seed: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Pure seed logic matching Munki <c>process_default_installs</c>. Mutates
-    /// <paramref name="selfServe"/> in place. Returns true when the SelfServe
-    /// manifest changed and should be persisted.
-    /// </summary>
-    internal static bool SeedDefaultInstallsInto(
-        List<ManifestItem> items,
-        SelfServiceManifest selfServe,
-        out List<string> seededNames)
-    {
-        seededNames = new List<string>();
-        selfServe.DefaultInstalls ??= [];
-        selfServe.ManagedInstalls ??= [];
-
-        var alreadyOffered = new HashSet<string>(
-            selfServe.DefaultInstalls.Where(n => !string.IsNullOrWhiteSpace(n)),
-            StringComparer.OrdinalIgnoreCase);
-
-        var changed = false;
-
-        foreach (var item in items)
-        {
-            if (!string.Equals(item.Action, "default", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var name = item.Name;
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                continue;
-            }
-
-            // Munki: if item not in SelfServe default_installs, append it and
-            // also append to managed_installs when missing. Does not consult
-            // optional_installs and does not touch managed_uninstalls.
-            if (alreadyOffered.Contains(name))
-            {
-                continue;
-            }
-
-            selfServe.DefaultInstalls.Add(name);
-            alreadyOffered.Add(name);
-
-            if (!selfServe.ManagedInstalls.Any(x => x.Equals(name, StringComparison.OrdinalIgnoreCase)))
-            {
-                selfServe.ManagedInstalls.Add(name);
-            }
-
-            seededNames.Add(name);
-            changed = true;
-            ConsoleLogger.Debug($"SelfServe: seeded default_installs item: {name}");
-        }
-
-        return changed;
-    }
     
     /// <summary>
     /// Merges the user-writable SelfServeManifest into the manifest item list.
@@ -820,12 +704,12 @@ public class ManifestService
         const string selfServeSource = "SelfServeManifest";
 
         // Actions that mandate the item's presence/absence. A self-serve request
-        // can never override these. "optional", "update", and "default" are
-        // deliberately NOT here: optional_installs offers the item, managed_updates
-        // only says "patch if present", and default_installs is a one-time SelfServe
-        // seed — the user remains the authority on presence afterward.
+        // can never override these. "optional" and "update" are deliberately NOT
+        // here: optional_installs offers the item, and managed_updates only says
+        // "patch if present" — the user remains the authority on presence for
+        // the common optional_installs + managed_updates combo.
         static bool IsPresenceMandating(ManifestItem i) =>
-            i.Action?.ToLowerInvariant() is "install" or "uninstall" or "profile" or "app";
+            i.Action?.ToLowerInvariant() is "install" or "uninstall" or "default" or "profile" or "app";
 
         foreach (var name in selfServe.ManagedInstalls)
         {
@@ -860,22 +744,8 @@ public class ManifestService
                     SetItemSource(name, selfServeSource, "managed_installs");
                     ConsoleLogger.Debug($"SelfServe: promoted optional to install item: {name} originalSource: {optional.SourceManifest}");
                 }
-                else
-                {
-                    // default_installs marker (already SelfServe-seeded): promote it.
-                    // Pure managed_updates with a stale SelfServe install request is
-                    // left alone — MSC never offers those items.
-                    var target = matches.FirstOrDefault(i =>
-                        string.Equals(i.Action, "default", StringComparison.OrdinalIgnoreCase));
-                    if (target != null)
-                    {
-                        target.Action = "install";
-                        target.IsSelfServe = true;
-                        target.PromotedFromOptional = false;
-                        SetItemSource(name, selfServeSource, "managed_installs");
-                        ConsoleLogger.Debug($"SelfServe: promoted default to install item: {name} originalSource: {target.SourceManifest}");
-                    }
-                }
+                // Only managed_updates entries: MSC never offers such an item,
+                // so an install request here is stale state — leave it alone.
             }
             // If the item is already managed_installs / uninstall by server policy,
             // leave it alone — admin policy wins.
@@ -899,10 +769,10 @@ public class ManifestService
             }
             else if (!matches.Any(IsPresenceMandating))
             {
-                // Optional, default, and/or managed_updates — the user is the
-                // authority on presence, so honor the removal request when we can
-                // flip a list entry. Deduplication ranks uninstall above
-                // update/default, so the flipped entry wins.
+                // Optional item (possibly also under managed_updates) — the user
+                // is the authority on presence, so honor the removal request.
+                // Deduplication ranks uninstall above update, so the flipped
+                // entry wins even when an update entry remains.
                 var optional = matches.FirstOrDefault(i =>
                     string.Equals(i.Action, "optional", StringComparison.OrdinalIgnoreCase));
                 if (optional != null)
@@ -912,24 +782,11 @@ public class ManifestService
                     SetItemSource(name, selfServeSource, "managed_uninstalls");
                     ConsoleLogger.Debug($"SelfServe: flipped optional to uninstall item: {name} originalSource: {optional.SourceManifest}");
                 }
-                else
-                {
-                    var target = matches.FirstOrDefault(i =>
-                        string.Equals(i.Action, "default", StringComparison.OrdinalIgnoreCase));
-                    if (target != null)
-                    {
-                        target.Action = "uninstall";
-                        target.PromotedFromOptional = false;
-                        SetItemSource(name, selfServeSource, "managed_uninstalls");
-                        ConsoleLogger.Debug($"SelfServe: flipped default to uninstall item: {name} originalSource: {target.SourceManifest}");
-                    }
-                    // Pure managed_updates: leave alone (same as before).
-                }
             }
             else if (!matches.Any(i => string.Equals(i.Action, "uninstall", StringComparison.OrdinalIgnoreCase)))
             {
                 var blocking = matches.First(IsPresenceMandating);
-                // install / profile / app from server policy — admin wins.
+                // install / default / profile / app from server policy — admin wins.
                 ConsoleLogger.Info($"SelfServe: ignoring uninstall request for {name}; admin policy requires {blocking.Action} (source: {blocking.SourceManifest})");
             }
         }
@@ -1027,9 +884,8 @@ public class ManifestService
             }
         }
 
-        // Add default_installs — one-time SelfServe seed (see SeedDefaultInstallsAsync).
-        // IdentifyActions does not force-install leftover Action=default entries;
-        // presence after the first offer is owned by SelfServe / the user.
+        // Add default_installs — treated like managed_installs but only on first encounter
+        // (not enforced if user has previously removed the item)
         if (manifest.DefaultInstalls != null)
         {
             foreach (var name in manifest.DefaultInstalls)
@@ -1071,98 +927,16 @@ public class ManifestService
     }
 
     /// <summary>
-    /// Deduplicates manifest items by name. When the same name appears with
-    /// different actions across the manifest tree, the strongest action wins
-    /// regardless of encounter order, so an item listed in both
-    /// managed_installs and optional_installs is treated as a managed install.
-    ///
-    /// Action precedence (highest to lowest):
-    ///   install &gt; uninstall &gt; update &gt; default &gt; optional &gt; profile/app
-    /// (profile and app share the same rank.)
-    ///
-    /// Within the same action, the highest version wins; otherwise the first
-    /// occurrence's position is preserved.
+    /// Deduplicates manifest items. Same-action collisions keep the highest version.
+    /// True presence conflicts (install/uninstall) win over optional/update.
+    /// <c>managed_updates</c> and <c>optional_installs</c> for the same name both
+    /// survive — Munki treats those lists as orthogonal (patch-if-present + Self Service).
+    /// Prefer <see cref="InstallInfoAnalyzer.DeduplicatePreservingOrthogonalLists"/>;
+    /// this method delegates there so existing callers pick up the new semantics.
     /// </summary>
     public List<ManifestItem> DeduplicateItems(List<ManifestItem> items)
-    {
-        var dedup = new Dictionary<string, ManifestItem>(StringComparer.OrdinalIgnoreCase);
-        var orderedKeys = new List<string>();
+        => InstallInfoAnalyzer.DeduplicatePreservingOrthogonalLists(items);
 
-        foreach (var item in items)
-        {
-            if (string.IsNullOrEmpty(item.Name))
-                continue;
-
-            var key = item.Name.ToLowerInvariant();
-
-            if (dedup.TryGetValue(key, out var existing))
-            {
-                var existingRank = ActionPrecedence(existing.Action);
-                var incomingRank = ActionPrecedence(item.Action);
-
-                if (incomingRank > existingRank)
-                {
-                    // Stronger action supersedes (e.g. install supersedes optional)
-                    dedup[key] = item;
-                }
-                else if (incomingRank == existingRank && IsOlderVersion(existing.Version, item.Version))
-                {
-                    // Same action, prefer the newer version
-                    dedup[key] = item;
-                }
-                // Otherwise keep the existing entry
-            }
-            else
-            {
-                orderedKeys.Add(key);
-                dedup[key] = item;
-            }
-        }
-
-        var result = new List<ManifestItem>();
-        foreach (var key in orderedKeys)
-        {
-            result.Add(dedup[key]);
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// Ranks manifest actions by precedence so that stronger directives win
-    /// when the same item name appears with conflicting actions across
-    /// included manifests. Higher number = stronger directive.
-    /// </summary>
-    private static int ActionPrecedence(string? action) => action?.ToLowerInvariant() switch
-    {
-        "install" => 6,
-        "uninstall" => 5,
-        "update" => 4,
-        "default" => 3,
-        "optional" => 2,
-        "profile" => 1,
-        "app" => 1,
-        _ => 0,
-    };
-
-    /// <summary>
-    /// Compare versions to determine if v1 is older than v2.
-    /// Go parity: pkg/status.IsOlderVersion
-    /// </summary>
-    private static bool IsOlderVersion(string? v1, string? v2)
-    {
-        if (string.IsNullOrEmpty(v1)) return true;
-        if (string.IsNullOrEmpty(v2)) return false;
-        
-        // Try to parse as Version objects first
-        if (Version.TryParse(v1.Replace("-", "."), out var ver1) && 
-            Version.TryParse(v2.Replace("-", "."), out var ver2))
-        {
-            return ver1 < ver2;
-        }
-
-        // Fall back to string comparison
-        return string.Compare(v1, v2, StringComparison.OrdinalIgnoreCase) < 0;
-    }
 }
 
 /// <summary>
