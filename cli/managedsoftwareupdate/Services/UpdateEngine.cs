@@ -1088,10 +1088,12 @@ public class UpdateEngine : IDisposable
             {
                 case "install":
                 case "update":
-                case "default":
                     // Gate install-like actions on OS-version and agent-version eligibility.
                     // Uninstall is intentionally excluded so an item that becomes unsupported
                     // on the current OS or requires a newer agent can still be removed.
+                    // default_installs are NOT handled here: they seed SelfServe once
+                    // (ManifestService.SeedDefaultInstallsAsync) and then install via the
+                    // SelfServe-promoted "install" action. Leftover Action=default is a no-op.
                     if (!IsEligibleForOsVersion(catalogItem, out var osReason, out var osReasonCode))
                     {
                         ConsoleLogger.Info($"Skipping {item.Name}: {osReason}");
@@ -1270,6 +1272,15 @@ public class UpdateEngine : IDisposable
                             ConsoleLogger.Info($"    -> Adding to toInstall");
                         }
                     }
+                    break;
+
+                case "default":
+                    // Manifest default_installs only seed SelfServe; they do not force
+                    // install. After SeedDefaultInstallsAsync + MergeSelfServe, the
+                    // winning action is SelfServe "install". A leftover Action=default
+                    // (missing optional_installs, or local-only manifest without seed)
+                    // is intentionally skipped.
+                    ConsoleLogger.Detail($"    Skipping default_installs marker item: {item.Name} (installs only via SelfServe seed)");
                     break;
 
                 case "optional":
@@ -3407,17 +3418,9 @@ public class UpdateEngine : IDisposable
                         break;
 
                     case "default":
-                        // Default installs: treated like managed_installs but only when not already installed.
-                        // If already installed, they silently disappear (not re-enforced).
-                        if (toInstallNames.Contains(key) &&
-                            (cat == null || _statusService.CheckStatus(cat, "install", _config.CachePath).NeedsAction))
-                        {
-                            var defItem = BuildInstallInfoItem(mi.Name, cat);
-                            defItem.Status = "will-be-installed";
-                            defItem.WillBeInstalled = true;
-                            info.ManagedInstalls.Add(defItem);
-                        }
-                        // If already installed, don't add to any list — default installs are not enforced after first install
+                        // Leftover Action=default after seed/merge is a marker only.
+                        // Pending installs from a SelfServe seed appear under the
+                        // promoted "install" action above.
                         break;
                 }
             }
